@@ -1,0 +1,757 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'none'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Entra application triage</title>
+<style>
+:root{color-scheme:dark;--bg:#0c1321;--panel:#151f32;--line:#30405a;--text:#edf3ff;--muted:#acbbd3;--accent:#8ebcff}
+*{box-sizing:border-box}body{font:14px/1.5 system-ui,sans-serif;background:var(--bg);color:var(--text);margin:0}
+main{max-width:1560px;margin:auto;padding:30px}h1{margin:0 0 5px;font-size:28px}h2{font-size:17px;margin:20px 0 8px}
+p{margin:8px 0}.muted,small{color:var(--muted)}.notice{padding:12px 16px;border:1px solid #9b783b;background:#302619;border-radius:8px;margin:16px 0;white-space:pre-line}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:12px;margin:20px 0}.card{background:var(--panel);border:1px solid var(--line);padding:16px;border-radius:10px}.card strong{display:block;font-size:27px}
+.controls{display:flex;gap:12px;flex-wrap:wrap;align-items:end;margin:18px 0}label{display:flex;flex-direction:column;gap:4px;color:var(--muted)}
+input,select,button{font:inherit;color:var(--text);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:9px}input{min-width:300px}button{cursor:pointer}button:hover{border-color:var(--accent)}
+.scroll{overflow:auto}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:11px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-weight:600;white-space:nowrap}thead{background:var(--panel)}td.name{min-width:270px}td code{overflow-wrap:anywhere}code{font-size:12px}
+.badge{display:inline-block;border:1px solid var(--line);border-radius:20px;padding:2px 9px;font-size:12px;white-space:nowrap}.Critical,.Expired{color:#ffacb3;border-color:#c65e70}.High,.Expiring{color:#ffd094;border-color:#b78443}.Medium{color:#ffe69c;border-color:#9b8c4a}.Low,.Valid{color:#9de2c1;border-color:#448d77}
+.Unknown,.manual{color:#d2b6ff}.details{background:#111b2d;padding:18px}.details td{font-size:13px}.detail-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:8px}.detail-grid code{display:block}
+.pager{display:flex;gap:12px;align-items:center;justify-content:flex-end;margin:14px 0}.empty{text-align:center;padding:30px}.toggle{background:transparent;text-align:left;border:0;padding:0;color:var(--accent);font-weight:600}.disabled{color:#ffd094}
+summary{cursor:pointer;color:var(--accent)}a{color:var(--accent)}.wrap{overflow-wrap:anywhere}noscript{display:block;padding:30px;color:#ffd094}
+@media(max-width:700px){main{padding:15px}input{min-width:220px}.controls label{width:100%}}
+@media print{.controls,.pager,button{display:none}body{background:white;color:black}.scroll{overflow:visible}.muted,small,th{color:#444}}
+</style></head><body><main>
+<h1>Entra application triage</h1><p class="muted" id="metadata"></p>
+<div id="demo" class="notice" hidden>DEMONSTRATION DATA ONLY - this report does not contain a real tenant inventory.</div>
+<div id="warnings" class="notice" hidden></div>
+<div class="cards" id="cards"></div>
+<details><summary>Scope, ranking model, and important limitations</summary>
+<p>This inventory combines local app registrations and tenant service principals, including managed identities and Microsoft/third-party enterprise apps. A registration is linked by client ID; registrations without a service principal are retained. Disabled apps remain visible and retain their grant-based score.</p>
+<p><strong>Priority is a heuristic, not an effective-access calculation.</strong> Only granted API permissions contribute: maximum permission weight plus one point per additional distinct resource/type/permission, capped at +5 and a total of 100. Application permissions are not user-bound; delegated access is limited by the signed-in user and API policy. Repeated per-user consent does not inflate the score.</p>
+<p>Microsoft Graph weights: identity/credential/consent control 95; broad write/full control/mail sending 80; broad read 65; selected-resource scopes 40; basic sign-in scopes 20; unclassified scopes 60. Delegated weights are reduced by 15, minimum 5. Non-Graph APIs are conservatively 70 and unresolved grants 75, both requiring manual review; the default/zero app role is 10. Critical &ge;90, High &ge;65, Medium &ge;35, Low &gt;0. Zero means no collected API grants, <strong>not no access</strong>.</p>
+<p>Requested permissions are displayed separately and never treated as consent. Existing grants can exceed a registration's current request list. Tenant-wide and per-user delegated consents are distinguished; principal IDs are preserved without looking up user profiles.</p>
+<p>Secret expiration is a separate operational signal, not privilege. UTC dates and days remaining are calculated at collection start. Metadata only: secret values and hints are never exported. For external/multitenant apps, home-tenant registration secrets are not visible here. A managed identity normally has no client secret.</p>
+<p>This is not a point-in-time transactional snapshot. Entra replication and changes during collection can affect results. Not covered: Entra directory roles/PIM, Azure RBAC, Exchange application RBAC/access policies, SharePoint or Teams resource-specific grants, API-internal authorization, federated credentials, certificates, or secrets outside Entra. No tenant changes or external network requests are made by this dashboard.</p>
+</details>
+<div class="controls">
+<label>Search apps, IDs, APIs, permissions<input id="search" type="search" placeholder="e.g. Mail.Read, app name, client ID"></label>
+<label>Priority<select id="band"><option value="">All priorities</option><option>Critical</option><option>High</option><option>Medium</option><option>Low</option><option>No API grants</option></select></label>
+<label>Application type<select id="kind"><option value="">All types</option><option>Registration + enterprise app</option><option>Enterprise application</option><option>Registration only</option><option>Managed identity</option></select></label>
+<label>Granted access<select id="access"><option value="">Any / none</option><option value="application">Application permissions</option><option value="delegated">Delegated permissions</option><option value="tenant">Tenant-wide delegated consent</option><option value="user">Per-user delegated consent</option><option value="review">Needs manual classification</option><option value="none">No API grants</option></select></label>
+<label>Client secrets<select id="secrets"><option value="">All</option><option value="Expired">Has expired secrets</option><option value="Expiring">Has expiring secrets</option><option value="Unknown expiry">Unknown expiration</option><option value="none">No visible secrets</option></select></label>
+<label>Sort<select id="sort"><option value="priority">Most privileged first</option><option value="least">Least privileged first</option><option value="expiry">Earliest secret expiration</option><option value="name">Application name</option></select></label>
+</div>
+<p class="muted" id="resultCount" aria-live="polite"></p>
+<div class="scroll"><table aria-label="Application triage"><thead><tr><th>Priority</th><th>Application / client ID</th><th>Type / status</th><th>Granted APIs</th><th>Requested</th><th>Client secrets</th><th>Earliest secret expiry (UTC)</th></tr></thead><tbody id="rows"></tbody></table></div>
+<div class="pager"><button id="previous" type="button">Previous</button><span id="pageInfo"></span><button id="next" type="button">Next</button></div>
+<noscript>Enable JavaScript to view this local dashboard, or inspect inventory.json directly.</noscript>
+</main>
+<script id="inventory" type="application/json">
+{
+    "SchemaVersion":  1,
+    "TenantId":  "11111111-1111-1111-1111-111111111111",
+    "GraphEndpoint":  "https://graph.microsoft.com/v1.0",
+    "CollectionStartedUtc":  "2026-10-20T14:23:54.7685246+00:00",
+    "CollectionCompletedUtc":  "2026-10-20T14:23:55.1379986+00:00",
+    "ExpiringInDays":  30,
+    "IsDemo":  true,
+    "ApplicationCount":  4,
+    "ServicePrincipalCount":  9,
+    "Warnings":  [
+                     "1 delegated grant(s) reference client service principals absent from the collected inventory. See OrphanedDelegatedGrants in JSON.",
+                     "Some granted permissions are unresolved or unclassified. Their conservative triage scores require manual interpretation.",
+                     "Some client-secret metadata has no expiration date. Review entries marked Unknown expiry."
+                 ],
+    "OrphanedDelegatedGrants":  [
+                                    {
+                                        "Id":  "orphaned-grant",
+                                        "ClientId":  "sp-missing",
+                                        "ResourceId":  "sp-00000003-0000-0000-c000-000000000000",
+                                        "Scope":  "User.Read",
+                                        "ConsentType":  "Principal",
+                                        "PrincipalId":  "demo-user-3"
+                                    }
+                                ],
+    "Applications":  [
+                         {
+                             "DisplayName":  "Directory automation (demo)",
+                             "ApplicationDisplayName":  "Directory automation (demo)",
+                             "AppId":  "demo-admin",
+                             "ApplicationObjectId":  "app-demo-admin",
+                             "ServicePrincipalObjectId":  "sp-demo-admin",
+                             "ServicePrincipalType":  "Application",
+                             "Kind":  "Registration + enterprise app",
+                             "AccountEnabled":  true,
+                             "PublisherTenantId":  "11111111-1111-1111-1111-111111111111",
+                             "SignInAudience":  "AzureADMyOrg",
+                             "Score":  96,
+                             "Band":  "Critical",
+                             "ScoreReasons":  [
+                                                  "RoleManagement.ReadWrite.Directory: Identity, credential, application, or consent control.",
+                                                  "Breadth adjustment: +1 for 2 distinct granted permissions."
+                                              ],
+                             "NeedsManualReview":  false,
+                             "GrantedApplicationCount":  2,
+                             "GrantedDelegatedCount":  0,
+                             "RequestedCount":  2,
+                             "GrantedPermissions":  [
+                                                        {
+                                                            "State":  "Granted",
+                                                            "Type":  "Application",
+                                                            "ResourceName":  "Microsoft Graph (demo)",
+                                                            "ResourceAppId":  "00000003-0000-0000-c000-000000000000",
+                                                            "ResourceServicePrincipalId":  "sp-00000003-0000-0000-c000-000000000000",
+                                                            "Permission":  "RoleManagement.ReadWrite.Directory",
+                                                            "PermissionId":  "role-control",
+                                                            "Resolved":  true,
+                                                            "ConsentType":  "Application assignment",
+                                                            "PrincipalId":  "",
+                                                            "GrantId":  "assignment-control",
+                                                            "ConsentStatus":  "",
+                                                            "Weight":  95,
+                                                            "Reason":  "Identity, credential, application, or consent control.",
+                                                            "NeedsReview":  false
+                                                        },
+                                                        {
+                                                            "State":  "Granted",
+                                                            "Type":  "Application",
+                                                            "ResourceName":  "Microsoft Graph (demo)",
+                                                            "ResourceAppId":  "00000003-0000-0000-c000-000000000000",
+                                                            "ResourceServicePrincipalId":  "sp-00000003-0000-0000-c000-000000000000",
+                                                            "Permission":  "Mail.Read",
+                                                            "PermissionId":  "role-mail",
+                                                            "Resolved":  true,
+                                                            "ConsentType":  "Application assignment",
+                                                            "PrincipalId":  "",
+                                                            "GrantId":  "assignment-mail",
+                                                            "ConsentStatus":  "",
+                                                            "Weight":  65,
+                                                            "Reason":  "Broad read access; data sensitivity requires review.",
+                                                            "NeedsReview":  false
+                                                        }
+                                                    ],
+                             "RequestedPermissions":  [
+                                                          {
+                                                              "State":  "Requested",
+                                                              "Type":  "Application",
+                                                              "ResourceName":  "Microsoft Graph (demo)",
+                                                              "ResourceAppId":  "00000003-0000-0000-c000-000000000000",
+                                                              "ResourceServicePrincipalId":  "sp-00000003-0000-0000-c000-000000000000",
+                                                              "Permission":  "RoleManagement.ReadWrite.Directory",
+                                                              "PermissionId":  "role-control",
+                                                              "Resolved":  true,
+                                                              "ConsentType":  "",
+                                                              "PrincipalId":  "",
+                                                              "GrantId":  "",
+                                                              "ConsentStatus":  "Application permission granted",
+                                                              "Weight":  95,
+                                                              "Reason":  "Identity, credential, application, or consent control.",
+                                                              "NeedsReview":  false
+                                                          },
+                                                          {
+                                                              "State":  "Requested",
+                                                              "Type":  "Delegated",
+                                                              "ResourceName":  "Microsoft Graph (demo)",
+                                                              "ResourceAppId":  "00000003-0000-0000-c000-000000000000",
+                                                              "ResourceServicePrincipalId":  "sp-00000003-0000-0000-c000-000000000000",
+                                                              "Permission":  "User.Read",
+                                                              "PermissionId":  "scope-user",
+                                                              "Resolved":  true,
+                                                              "ConsentType":  "",
+                                                              "PrincipalId":  "",
+                                                              "GrantId":  "",
+                                                              "ConsentStatus":  "Not found in collected grants",
+                                                              "Weight":  5,
+                                                              "Reason":  "Basic sign-in/profile or session scope. Delegated access is constrained by the signed-in user and API policy.",
+                                                              "NeedsReview":  false
+                                                          }
+                                                      ],
+                             "Secrets":  [
+                                             {
+                                                 "Source":  "Application",
+                                                 "SourceObjectId":  "app-demo-admin",
+                                                 "KeyId":  "key-expired",
+                                                 "DisplayName":  "Retired automation secret",
+                                                 "StartDateTime":  "2025-12-24T14:23:54.7366912+00:00",
+                                                 "EndDateTime":  "2026-10-19T14:23:54.7366912+00:00",
+                                                 "DaysRemaining":  -2,
+                                                 "Status":  "Expired",
+                                                 "NotYetValid":  false
+                                             },
+                                             {
+                                                 "Source":  "Application",
+                                                 "SourceObjectId":  "app-demo-admin",
+                                                 "KeyId":  "key-soon",
+                                                 "DisplayName":  "Rotation due",
+                                                 "StartDateTime":  "2026-09-30T14:23:54.7366912+00:00",
+                                                 "EndDateTime":  "2026-10-30T14:23:54.7366912+00:00",
+                                                 "DaysRemaining":  9,
+                                                 "Status":  "Expiring",
+                                                 "NotYetValid":  false
+                                             },
+                                             {
+                                                 "Source":  "ServicePrincipal",
+                                                 "SourceObjectId":  "sp-demo-admin",
+                                                 "KeyId":  "key-sp",
+                                                 "DisplayName":  "Service principal secret",
+                                                 "StartDateTime":  "2026-10-21T14:23:54.7366912+00:00",
+                                                 "EndDateTime":  "2027-01-18T14:23:54.7366912+00:00",
+                                                 "DaysRemaining":  89,
+                                                 "Status":  "Valid",
+                                                 "NotYetValid":  true
+                                             }
+                                         ]
+                         },
+                         {
+                             "DisplayName":  "Unresolved API grant (demo)",
+                             "ApplicationDisplayName":  "",
+                             "AppId":  "demo-unknown",
+                             "ApplicationObjectId":  "",
+                             "ServicePrincipalObjectId":  "sp-demo-unknown",
+                             "ServicePrincipalType":  "Application",
+                             "Kind":  "Enterprise application",
+                             "AccountEnabled":  true,
+                             "PublisherTenantId":  "11111111-1111-1111-1111-111111111111",
+                             "SignInAudience":  "",
+                             "Score":  75,
+                             "Band":  "High",
+                             "ScoreReasons":  [
+                                                  "unknown-role: Unresolved resource or permission; manual review required.",
+                                                  "Breadth adjustment: +0 for 1 distinct granted permissions."
+                                              ],
+                             "NeedsManualReview":  true,
+                             "GrantedApplicationCount":  1,
+                             "GrantedDelegatedCount":  0,
+                             "RequestedCount":  0,
+                             "GrantedPermissions":  [
+                                                        {
+                                                            "State":  "Granted",
+                                                            "Type":  "Application",
+                                                            "ResourceName":  "Unresolved API",
+                                                            "ResourceAppId":  "",
+                                                            "ResourceServicePrincipalId":  "missing-resource",
+                                                            "Permission":  "unknown-role",
+                                                            "PermissionId":  "unknown-role",
+                                                            "Resolved":  false,
+                                                            "ConsentType":  "Application assignment",
+                                                            "PrincipalId":  "",
+                                                            "GrantId":  "assignment-unknown",
+                                                            "ConsentStatus":  "",
+                                                            "Weight":  75,
+                                                            "Reason":  "Unresolved resource or permission; manual review required.",
+                                                            "NeedsReview":  true
+                                                        }
+                                                    ],
+                             "RequestedPermissions":  [
+
+                                                      ],
+                             "Secrets":  [
+
+                                         ]
+                         },
+                         {
+                             "DisplayName":  "Vendor integration (demo)",
+                             "ApplicationDisplayName":  "",
+                             "AppId":  "demo-external",
+                             "ApplicationObjectId":  "",
+                             "ServicePrincipalObjectId":  "sp-demo-external",
+                             "ServicePrincipalType":  "Application",
+                             "Kind":  "Enterprise application",
+                             "AccountEnabled":  true,
+                             "PublisherTenantId":  "11111111-1111-1111-1111-111111111111",
+                             "SignInAudience":  "",
+                             "Score":  70,
+                             "Band":  "High",
+                             "ScoreReasons":  [
+                                                  "Finance.Reader: Non-Microsoft-Graph API: privilege semantics require manual review.",
+                                                  "Breadth adjustment: +0 for 1 distinct granted permissions."
+                                              ],
+                             "NeedsManualReview":  true,
+                             "GrantedApplicationCount":  1,
+                             "GrantedDelegatedCount":  0,
+                             "RequestedCount":  0,
+                             "GrantedPermissions":  [
+                                                        {
+                                                            "State":  "Granted",
+                                                            "Type":  "Application",
+                                                            "ResourceName":  "Internal finance API (demo)",
+                                                            "ResourceAppId":  "demo-custom-api",
+                                                            "ResourceServicePrincipalId":  "sp-demo-custom-api",
+                                                            "Permission":  "Finance.Reader",
+                                                            "PermissionId":  "custom-reader",
+                                                            "Resolved":  true,
+                                                            "ConsentType":  "Application assignment",
+                                                            "PrincipalId":  "",
+                                                            "GrantId":  "assignment-custom",
+                                                            "ConsentStatus":  "",
+                                                            "Weight":  70,
+                                                            "Reason":  "Non-Microsoft-Graph API: privilege semantics require manual review.",
+                                                            "NeedsReview":  true
+                                                        }
+                                                    ],
+                             "RequestedPermissions":  [
+
+                                                      ],
+                             "Secrets":  [
+
+                                         ]
+                         },
+                         {
+                             "DisplayName":  "Reporting managed identity (demo)",
+                             "ApplicationDisplayName":  "",
+                             "AppId":  "demo-managed",
+                             "ApplicationObjectId":  "",
+                             "ServicePrincipalObjectId":  "sp-demo-managed",
+                             "ServicePrincipalType":  "ManagedIdentity",
+                             "Kind":  "Managed identity",
+                             "AccountEnabled":  true,
+                             "PublisherTenantId":  "11111111-1111-1111-1111-111111111111",
+                             "SignInAudience":  "",
+                             "Score":  65,
+                             "Band":  "High",
+                             "ScoreReasons":  [
+                                                  "Directory.Read.All: Broad read access; data sensitivity requires review.",
+                                                  "Breadth adjustment: +0 for 1 distinct granted permissions."
+                                              ],
+                             "NeedsManualReview":  false,
+                             "GrantedApplicationCount":  1,
+                             "GrantedDelegatedCount":  0,
+                             "RequestedCount":  0,
+                             "GrantedPermissions":  [
+                                                        {
+                                                            "State":  "Granted",
+                                                            "Type":  "Application",
+                                                            "ResourceName":  "Microsoft Graph (demo)",
+                                                            "ResourceAppId":  "00000003-0000-0000-c000-000000000000",
+                                                            "ResourceServicePrincipalId":  "sp-00000003-0000-0000-c000-000000000000",
+                                                            "Permission":  "Directory.Read.All",
+                                                            "PermissionId":  "role-directory-read",
+                                                            "Resolved":  true,
+                                                            "ConsentType":  "Application assignment",
+                                                            "PrincipalId":  "",
+                                                            "GrantId":  "assignment-managed",
+                                                            "ConsentStatus":  "",
+                                                            "Weight":  65,
+                                                            "Reason":  "Broad read access; data sensitivity requires review.",
+                                                            "NeedsReview":  false
+                                                        }
+                                                    ],
+                             "RequestedPermissions":  [
+
+                                                      ],
+                             "Secrets":  [
+
+                                         ]
+                         },
+                         {
+                             "DisplayName":  "Employee sign-in (demo)",
+                             "ApplicationDisplayName":  "Employee sign-in (demo)",
+                             "AppId":  "demo-basic",
+                             "ApplicationObjectId":  "app-demo-basic",
+                             "ServicePrincipalObjectId":  "sp-demo-basic",
+                             "ServicePrincipalType":  "Application",
+                             "Kind":  "Registration + enterprise app",
+                             "AccountEnabled":  true,
+                             "PublisherTenantId":  "11111111-1111-1111-1111-111111111111",
+                             "SignInAudience":  "AzureADMyOrg",
+                             "Score":  6,
+                             "Band":  "Low",
+                             "ScoreReasons":  [
+                                                  "User.Read: Basic sign-in/profile or session scope. Delegated access is constrained by the signed-in user and API policy.",
+                                                  "Breadth adjustment: +1 for 2 distinct granted permissions."
+                                              ],
+                             "NeedsManualReview":  false,
+                             "GrantedApplicationCount":  0,
+                             "GrantedDelegatedCount":  2,
+                             "RequestedCount":  1,
+                             "GrantedPermissions":  [
+                                                        {
+                                                            "State":  "Granted",
+                                                            "Type":  "Delegated",
+                                                            "ResourceName":  "Microsoft Graph (demo)",
+                                                            "ResourceAppId":  "00000003-0000-0000-c000-000000000000",
+                                                            "ResourceServicePrincipalId":  "sp-00000003-0000-0000-c000-000000000000",
+                                                            "Permission":  "User.Read",
+                                                            "PermissionId":  "scope-user",
+                                                            "Resolved":  true,
+                                                            "ConsentType":  "Principal",
+                                                            "PrincipalId":  "demo-user-1",
+                                                            "GrantId":  "grant-user-1",
+                                                            "ConsentStatus":  "",
+                                                            "Weight":  5,
+                                                            "Reason":  "Basic sign-in/profile or session scope. Delegated access is constrained by the signed-in user and API policy.",
+                                                            "NeedsReview":  false
+                                                        },
+                                                        {
+                                                            "State":  "Granted",
+                                                            "Type":  "Delegated",
+                                                            "ResourceName":  "Microsoft Graph (demo)",
+                                                            "ResourceAppId":  "00000003-0000-0000-c000-000000000000",
+                                                            "ResourceServicePrincipalId":  "sp-00000003-0000-0000-c000-000000000000",
+                                                            "Permission":  "User.Read",
+                                                            "PermissionId":  "scope-user",
+                                                            "Resolved":  true,
+                                                            "ConsentType":  "Principal",
+                                                            "PrincipalId":  "demo-user-2",
+                                                            "GrantId":  "grant-user-2",
+                                                            "ConsentStatus":  "",
+                                                            "Weight":  5,
+                                                            "Reason":  "Basic sign-in/profile or session scope. Delegated access is constrained by the signed-in user and API policy.",
+                                                            "NeedsReview":  false
+                                                        },
+                                                        {
+                                                            "State":  "Granted",
+                                                            "Type":  "Delegated",
+                                                            "ResourceName":  "Microsoft Graph (demo)",
+                                                            "ResourceAppId":  "00000003-0000-0000-c000-000000000000",
+                                                            "ResourceServicePrincipalId":  "sp-00000003-0000-0000-c000-000000000000",
+                                                            "Permission":  "offline_access",
+                                                            "PermissionId":  "scope-offline",
+                                                            "Resolved":  true,
+                                                            "ConsentType":  "AllPrincipals",
+                                                            "PrincipalId":  "",
+                                                            "GrantId":  "grant-tenant",
+                                                            "ConsentStatus":  "",
+                                                            "Weight":  5,
+                                                            "Reason":  "Basic sign-in/profile or session scope. Delegated access is constrained by the signed-in user and API policy.",
+                                                            "NeedsReview":  false
+                                                        }
+                                                    ],
+                             "RequestedPermissions":  [
+                                                          {
+                                                              "State":  "Requested",
+                                                              "Type":  "Delegated",
+                                                              "ResourceName":  "Microsoft Graph (demo)",
+                                                              "ResourceAppId":  "00000003-0000-0000-c000-000000000000",
+                                                              "ResourceServicePrincipalId":  "sp-00000003-0000-0000-c000-000000000000",
+                                                              "Permission":  "User.Read",
+                                                              "PermissionId":  "scope-user",
+                                                              "Resolved":  true,
+                                                              "ConsentType":  "",
+                                                              "PrincipalId":  "",
+                                                              "GrantId":  "",
+                                                              "ConsentStatus":  "Granted for specific user(s)",
+                                                              "Weight":  5,
+                                                              "Reason":  "Basic sign-in/profile or session scope. Delegated access is constrained by the signed-in user and API policy.",
+                                                              "NeedsReview":  false
+                                                          }
+                                                      ],
+                             "Secrets":  [
+
+                                         ]
+                         },
+                         {
+                             "DisplayName":  "Disabled app with requested access (demo)",
+                             "ApplicationDisplayName":  "Disabled app with requested access (demo)",
+                             "AppId":  "demo-requested",
+                             "ApplicationObjectId":  "app-demo-requested",
+                             "ServicePrincipalObjectId":  "sp-demo-requested",
+                             "ServicePrincipalType":  "Application",
+                             "Kind":  "Registration + enterprise app",
+                             "AccountEnabled":  false,
+                             "PublisherTenantId":  "11111111-1111-1111-1111-111111111111",
+                             "SignInAudience":  "AzureADMyOrg",
+                             "Score":  0,
+                             "Band":  "No API grants",
+                             "ScoreReasons":  [
+                                                  "No granted API permissions were found in the collected tenant data."
+                                              ],
+                             "NeedsManualReview":  false,
+                             "GrantedApplicationCount":  0,
+                             "GrantedDelegatedCount":  0,
+                             "RequestedCount":  1,
+                             "GrantedPermissions":  [
+
+                                                    ],
+                             "RequestedPermissions":  [
+                                                          {
+                                                              "State":  "Requested",
+                                                              "Type":  "Application",
+                                                              "ResourceName":  "Microsoft Graph (demo)",
+                                                              "ResourceAppId":  "00000003-0000-0000-c000-000000000000",
+                                                              "ResourceServicePrincipalId":  "sp-00000003-0000-0000-c000-000000000000",
+                                                              "Permission":  "RoleManagement.ReadWrite.Directory",
+                                                              "PermissionId":  "role-control",
+                                                              "Resolved":  true,
+                                                              "ConsentType":  "",
+                                                              "PrincipalId":  "",
+                                                              "GrantId":  "",
+                                                              "ConsentStatus":  "Not found in collected grants",
+                                                              "Weight":  95,
+                                                              "Reason":  "Identity, credential, application, or consent control.",
+                                                              "NeedsReview":  false
+                                                          }
+                                                      ],
+                             "Secrets":  [
+
+                                         ]
+                         },
+                         {
+                             "DisplayName":  "Example \u003c/script\u003e\u003cimg src=x onerror=\"window.pwned=true\"\u003e (demo)",
+                             "ApplicationDisplayName":  "",
+                             "AppId":  "demo-injection",
+                             "ApplicationObjectId":  "",
+                             "ServicePrincipalObjectId":  "sp-demo-injection",
+                             "ServicePrincipalType":  "Application",
+                             "Kind":  "Enterprise application",
+                             "AccountEnabled":  true,
+                             "PublisherTenantId":  "11111111-1111-1111-1111-111111111111",
+                             "SignInAudience":  "",
+                             "Score":  0,
+                             "Band":  "No API grants",
+                             "ScoreReasons":  [
+                                                  "No granted API permissions were found in the collected tenant data."
+                                              ],
+                             "NeedsManualReview":  false,
+                             "GrantedApplicationCount":  0,
+                             "GrantedDelegatedCount":  0,
+                             "RequestedCount":  0,
+                             "GrantedPermissions":  [
+
+                                                    ],
+                             "RequestedPermissions":  [
+
+                                                      ],
+                             "Secrets":  [
+
+                                         ]
+                         },
+                         {
+                             "DisplayName":  "Internal finance API (demo)",
+                             "ApplicationDisplayName":  "",
+                             "AppId":  "demo-custom-api",
+                             "ApplicationObjectId":  "",
+                             "ServicePrincipalObjectId":  "sp-demo-custom-api",
+                             "ServicePrincipalType":  "Application",
+                             "Kind":  "Enterprise application",
+                             "AccountEnabled":  true,
+                             "PublisherTenantId":  "11111111-1111-1111-1111-111111111111",
+                             "SignInAudience":  "",
+                             "Score":  0,
+                             "Band":  "No API grants",
+                             "ScoreReasons":  [
+                                                  "No granted API permissions were found in the collected tenant data."
+                                              ],
+                             "NeedsManualReview":  false,
+                             "GrantedApplicationCount":  0,
+                             "GrantedDelegatedCount":  0,
+                             "RequestedCount":  0,
+                             "GrantedPermissions":  [
+
+                                                    ],
+                             "RequestedPermissions":  [
+
+                                                      ],
+                             "Secrets":  [
+
+                                         ]
+                         },
+                         {
+                             "DisplayName":  "Microsoft Graph (demo)",
+                             "ApplicationDisplayName":  "",
+                             "AppId":  "00000003-0000-0000-c000-000000000000",
+                             "ApplicationObjectId":  "",
+                             "ServicePrincipalObjectId":  "sp-00000003-0000-0000-c000-000000000000",
+                             "ServicePrincipalType":  "Application",
+                             "Kind":  "Enterprise application",
+                             "AccountEnabled":  true,
+                             "PublisherTenantId":  "11111111-1111-1111-1111-111111111111",
+                             "SignInAudience":  "",
+                             "Score":  0,
+                             "Band":  "No API grants",
+                             "ScoreReasons":  [
+                                                  "No granted API permissions were found in the collected tenant data."
+                                              ],
+                             "NeedsManualReview":  false,
+                             "GrantedApplicationCount":  0,
+                             "GrantedDelegatedCount":  0,
+                             "RequestedCount":  0,
+                             "GrantedPermissions":  [
+
+                                                    ],
+                             "RequestedPermissions":  [
+
+                                                      ],
+                             "Secrets":  [
+
+                                         ]
+                         },
+                         {
+                             "DisplayName":  "Unprovisioned registration (demo)",
+                             "ApplicationDisplayName":  "Unprovisioned registration (demo)",
+                             "AppId":  "demo-orphan",
+                             "ApplicationObjectId":  "app-demo-orphan",
+                             "ServicePrincipalObjectId":  "",
+                             "ServicePrincipalType":  "",
+                             "Kind":  "Registration only",
+                             "AccountEnabled":  null,
+                             "PublisherTenantId":  "",
+                             "SignInAudience":  "AzureADMyOrg",
+                             "Score":  0,
+                             "Band":  "No API grants",
+                             "ScoreReasons":  [
+                                                  "No granted API permissions were found in the collected tenant data."
+                                              ],
+                             "NeedsManualReview":  false,
+                             "GrantedApplicationCount":  0,
+                             "GrantedDelegatedCount":  0,
+                             "RequestedCount":  1,
+                             "GrantedPermissions":  [
+
+                                                    ],
+                             "RequestedPermissions":  [
+                                                          {
+                                                              "State":  "Requested",
+                                                              "Type":  "Delegated",
+                                                              "ResourceName":  "Unresolved API",
+                                                              "ResourceAppId":  "missing-api",
+                                                              "ResourceServicePrincipalId":  "",
+                                                              "Permission":  "missing-scope",
+                                                              "PermissionId":  "missing-scope",
+                                                              "Resolved":  false,
+                                                              "ConsentType":  "",
+                                                              "PrincipalId":  "",
+                                                              "GrantId":  "",
+                                                              "ConsentStatus":  "No tenant service principal",
+                                                              "Weight":  75,
+                                                              "Reason":  "Unresolved resource or permission; manual review required.",
+                                                              "NeedsReview":  true
+                                                          }
+                                                      ],
+                             "Secrets":  [
+                                             {
+                                                 "Source":  "Application",
+                                                 "SourceObjectId":  "app-demo-orphan",
+                                                 "KeyId":  "unknown-expiry",
+                                                 "DisplayName":  "Missing expiry metadata",
+                                                 "StartDateTime":  null,
+                                                 "EndDateTime":  null,
+                                                 "DaysRemaining":  null,
+                                                 "Status":  "Unknown expiry",
+                                                 "NotYetValid":  false
+                                             }
+                                         ]
+                         }
+                     ]
+}
+</script>
+<script>
+'use strict';
+const data = JSON.parse(document.getElementById('inventory').textContent);
+const apps = data.Applications;
+const byId = id => document.getElementById(id);
+const el = (tag, text, cls) => { const n = document.createElement(tag); if (text !== undefined) n.textContent = String(text); if (cls) n.className = cls; return n; };
+const badge = (text, cls) => el('span', text, 'badge ' + (cls || text));
+const utc = value => value ? new Date(value).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC') : 'Unknown';
+const expiry = app => {
+  const dates = app.Secrets.filter(s => s.EndDateTime).map(s => Date.parse(s.EndDateTime));
+  return dates.length ? Math.min(...dates) : Infinity;
+};
+const uniqueSecrets = new Map();
+for (const app of apps) for (const s of app.Secrets) uniqueSecrets.set([s.Source,s.SourceObjectId,s.KeyId].join('|'), s);
+const secrets = [...uniqueSecrets.values()];
+byId('metadata').textContent = 'Tenant: ' + data.TenantId + ' | Collection: ' + utc(data.CollectionStartedUtc) + ' to ' + utc(data.CollectionCompletedUtc);
+byId('demo').hidden = !data.IsDemo;
+if (data.Warnings.length) { byId('warnings').hidden = false; byId('warnings').textContent = data.Warnings.join('\n'); }
+for (const [label, value] of [
+  ['Review rows', apps.length], ['App registrations', data.ApplicationCount], ['Service principals', data.ServicePrincipalCount],
+  ['Critical / high priority', apps.filter(a => ['Critical','High'].includes(a.Band)).length],
+  ['Visible client secrets', secrets.length], ['Expired secrets', secrets.filter(s => s.Status === 'Expired').length],
+  ['Expiring in ' + data.ExpiringInDays + ' days', secrets.filter(s => s.Status === 'Expiring').length]
+]) { const card = el('div', undefined, 'card'); card.append(el('strong', value), el('span', label)); byId('cards').append(card); }
+const searchable = new Map(apps.map(a => [a, [a.DisplayName,a.ApplicationDisplayName,a.AppId,a.ApplicationObjectId,a.ServicePrincipalObjectId,
+  ...a.GrantedPermissions.concat(a.RequestedPermissions).flatMap(p => [p.Permission,p.PermissionId,p.ResourceName,p.ResourceAppId,p.ResourceServicePrincipalId,p.PrincipalId])].join(' ').toLowerCase()]));
+let page = 0;
+const pageSize = 50;
+function table(parent, headers, rows) {
+  const wrap = el('div', undefined, 'scroll'), t = el('table'), head = el('thead'), tr = el('tr'), body = el('tbody');
+  for (const h of headers) tr.append(el('th', h));
+  head.append(tr);
+  for (const values of rows) {
+    const r = el('tr');
+    for (const v of values) { const c = el('td', undefined, 'wrap'); c.append(v instanceof Node ? v : document.createTextNode(String(v === null || v === undefined ? '' : v))); r.append(c); }
+    body.append(r);
+  }
+  t.append(head,body); wrap.append(t); parent.append(wrap);
+}
+function permissionRows(permissions, requested) {
+  return permissions.map(p => {
+    const permission = el('div'); permission.append(el('strong', p.Permission), el('div', p.PermissionId || 'No definition ID available', 'muted'));
+    if (!p.Resolved) permission.append(el('div', 'Unresolved definition / default role', 'manual'));
+    const api = el('div', p.ResourceName); api.append(el('div', p.ResourceAppId || p.ResourceServicePrincipalId, 'muted'));
+    return [api,permission,p.Type,requested ? p.ConsentStatus : p.ConsentType,
+      requested ? 'Requested only; does not establish access' : (p.PrincipalId || (p.Type === 'Application' ? 'App identity' : 'All users')),
+      requested ? p.Reason : p.Weight + ' - ' + p.Reason];
+  });
+}
+function detail(app) {
+  const panel = el('div', undefined, 'details'), ids = el('div', undefined, 'detail-grid');
+  for (const [label,value] of [['Registration object ID',app.ApplicationObjectId],['Service principal object ID',app.ServicePrincipalObjectId],
+    ['Registration display name',app.ApplicationDisplayName],['Publisher tenant ID',app.PublisherTenantId],['Sign-in audience',app.SignInAudience],['Service principal type',app.ServicePrincipalType]]) {
+    const item = el('div',label); item.append(el('code',value || 'Not present / not visible')); ids.append(item);
+  }
+  panel.append(ids,el('h2','Why this priority?'));
+  for (const reason of app.ScoreReasons) panel.append(el('p',reason));
+  panel.append(el('h2','Granted API permissions (' + app.GrantedPermissions.length + ' grant/scope entries)'));
+  if (!app.GrantedPermissions.length) panel.append(el('p','No granted API permissions found. This does not exclude other authorization paths.','muted'));
+  else table(panel,['API / resource ID','Permission / definition ID','Type','Consent','User object ID / subject','Weight / rationale'],permissionRows(app.GrantedPermissions,false));
+  panel.append(el('h2','Requested permissions (' + app.RequestedPermissions.length + ')'));
+  if (!app.ApplicationObjectId) panel.append(el('p','No local app registration. The publisher tenant request list is not visible here.','muted'));
+  else if (!app.RequestedPermissions.length) panel.append(el('p','No API permissions declared in requiredResourceAccess. Existing grants above may still apply.','muted'));
+  else table(panel,['API / resource ID','Permission / definition ID','Type','Observed consent','Interpretation','Classification rationale'],permissionRows(app.RequestedPermissions,true));
+  panel.append(el('h2','Client-secret metadata (' + app.Secrets.length + ')'));
+  if (!app.Secrets.length) panel.append(el('p','No client-secret metadata visible on the collected objects. This does not prove the application has no credentials.','muted'));
+  else table(panel,['Name / key ID','Source / object ID','Start (UTC)','Expiration (UTC)','Days left','State'],app.Secrets.map(s => {
+    const name = el('div',s.DisplayName || '(unnamed secret)'); name.append(el('div',s.KeyId,'muted'));
+    const source = el('div',s.Source); source.append(el('div',s.SourceObjectId,'muted'));
+    const state = el('div'); state.append(badge(s.Status,s.Status.split(' ')[0])); if (s.NotYetValid) state.append(el('div','Not yet valid','muted'));
+    return [name,source,s.StartDateTime ? utc(s.StartDateTime) : 'Unknown',utc(s.EndDateTime),s.DaysRemaining === null ? 'Unknown' : s.DaysRemaining,state];
+  }));
+  return panel;
+}
+function render() {
+  const query = byId('search').value.trim().toLowerCase(), band = byId('band').value, kind = byId('kind').value, access = byId('access').value, secret = byId('secrets').value;
+  const filtered = apps.filter(a => {
+    if (query && !searchable.get(a).includes(query)) return false;
+    if (band && a.Band !== band || kind && a.Kind !== kind) return false;
+    if (secret && (secret === 'none' ? a.Secrets.length !== 0 : !a.Secrets.some(s => s.Status === secret))) return false;
+    if (access === 'application' && !a.GrantedApplicationCount || access === 'delegated' && !a.GrantedDelegatedCount) return false;
+    if (access === 'review' && !a.NeedsManualReview || access === 'none' && a.GrantedPermissions.length) return false;
+    if (access === 'tenant' && !a.GrantedPermissions.some(p => p.Type === 'Delegated' && p.ConsentType === 'AllPrincipals')) return false;
+    if (access === 'user' && !a.GrantedPermissions.some(p => p.Type === 'Delegated' && p.ConsentType === 'Principal')) return false;
+    return true;
+  });
+  const sort = byId('sort').value;
+  filtered.sort((a,b) => {
+    let delta = 0;
+    if (sort === 'priority') delta = b.Score - a.Score;
+    else if (sort === 'least') delta = a.Score - b.Score;
+    else if (sort === 'expiry') { const x = expiry(a), y = expiry(b); delta = x === y ? 0 : x < y ? -1 : 1; }
+    return delta || a.DisplayName.localeCompare(b.DisplayName) || a.ServicePrincipalObjectId.localeCompare(b.ServicePrincipalObjectId);
+  });
+  const pages = Math.max(1,Math.ceil(filtered.length/pageSize)); page = Math.min(page,pages-1);
+  byId('rows').replaceChildren();
+  byId('resultCount').textContent = filtered.length + ' of ' + apps.length + ' rows match. Summary cards show the full inventory. Click an application to inspect permissions and secrets.';
+  for (const app of filtered.slice(page*pageSize,(page+1)*pageSize)) {
+    const row = el('tr'), priority = el('td'); priority.append(badge(app.Band),el('div',app.Score + ' / 100','muted')); if (app.NeedsManualReview) priority.append(el('small','Manual review','manual'));
+    const name = el('td',undefined,'name'), button = el('button',app.DisplayName || '(unnamed application)','toggle'); button.type = 'button'; button.setAttribute('aria-expanded','false');
+    name.append(button,el('div',app.AppId || 'No client ID','muted'));
+    const kindCell = el('td',app.Kind); if (app.AccountEnabled === false) kindCell.append(el('div','Disabled','disabled')); else if (app.AccountEnabled === true) kindCell.append(el('div','Enabled','muted'));
+    const granted = el('td',app.GrantedApplicationCount + ' application'); granted.append(el('div',app.GrantedDelegatedCount + ' delegated','muted'));
+    const secretCell = el('td',app.Secrets.length + ' visible');
+    for (const state of ['Expired','Expiring','Unknown expiry']) { const n = app.Secrets.filter(s => s.Status === state).length; if (n) { const line = el('div'); line.append(badge(n + ' ' + state,state.split(' ')[0])); secretCell.append(line); } }
+    const next = expiry(app); row.append(priority,name,kindCell,granted,el('td',app.RequestedCount),secretCell,el('td',next === Infinity ? 'No known expiry' : utc(next)));
+    const expanded = el('tr'); expanded.hidden = true; const cell = el('td'); cell.colSpan = 7; expanded.append(cell);
+    let loaded = false;
+    button.addEventListener('click',() => { if (!loaded) { cell.append(detail(app)); loaded = true; } expanded.hidden = !expanded.hidden; button.setAttribute('aria-expanded',String(!expanded.hidden)); });
+    byId('rows').append(row,expanded);
+  }
+  if (!filtered.length) { const row = el('tr'), c = el('td','No applications match these filters.','empty'); c.colSpan = 7; row.append(c); byId('rows').append(row); }
+  byId('pageInfo').textContent = 'Page ' + (page+1) + ' of ' + pages;
+  byId('previous').disabled = page === 0; byId('next').disabled = page >= pages-1;
+}
+let searchTimer;
+byId('search').addEventListener('input',() => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { page = 0; render(); },150); });
+for (const id of ['band','kind','access','secrets','sort']) byId(id).addEventListener('change',() => { page = 0; render(); });
+byId('previous').addEventListener('click',() => { page--; render(); });
+byId('next').addEventListener('click',() => { page++; render(); });
+render();
+</script></body></html>
